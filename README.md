@@ -65,26 +65,91 @@ function App() {
 }
 ```
 
+
+## API Reference
+
+### Options
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `uploadUrl` | `string` | Required | Endpoint that receives each chunk as multipart form data. |
+| `chunkSize` | `number` | `5 * 1024 * 1024` | Chunk size in bytes. Must be greater than `0`. |
+| `onProgress` | `(progress: number) => void` | `undefined` | Called after each completed chunk with byte-based progress from `0` to `100`. |
+| `onSuccess` | `(response: Response) => void` | `undefined` | Called after the final chunk succeeds. Receives the final HTTP `Response`. |
+| `onError` | `(error: Error) => void` | `undefined` | Called when validation or a chunk request fails. |
+
+### Return value
+
+| Value | Type | Description |
+| --- | --- | --- |
+| `startUpload` | `(file: File) => void` | Starts a new upload session for the selected file. |
+| `pauseUpload` | `() => void` | Aborts the in-flight request and pauses before the next chunk. |
+| `resumeUpload` | `() => void` | Continues from the last completed chunk. |
+| `retryUpload` | `() => void` | Retries from the failed chunk. Currently equivalent to `resumeUpload`. |
+| `progress` | `number` | Upload progress from `0` to `100`. |
+| `isUploading` | `boolean` | `true` while a chunk request is active. |
+| `isPaused` | `boolean` | `true` after pausing an active upload. |
+| `isError` | `boolean` | `true` after validation or request failure. |
+| `isSuccess` | `boolean` | `true` after the final chunk completes successfully. |
+
 ## Backend Implementation
 
-Your backend needs to handle the multipart form data sent by the hook. The hook sends the following fields with each request:
-- `file`: The actual binary chunk data.
-- `filename`: The original name of the file.
-- `uploadId`: A unique ID for this upload attempt. Use this to isolate concurrent files.
-- `chunkIndex`: The current chunk number (0-indexed).
-- `totalChunks`: The total number of chunks.
+Your backend needs to handle the multipart form data sent by the hook. The hook sends one `POST` request per chunk to `uploadUrl`.
 
-The endpoint must not return a successful response for the final chunk until the server has finalized the file. `onSuccess` receives that final HTTP `Response`.
+### Multipart fields
 
-Example (Express.js / Node.js):
-```javascript
+| Field | Description |
+| --- | --- |
+| `file` | The binary chunk data. |
+| `filename` | The original file name. |
+| `uploadId` | A generated ID for the current upload attempt. Use this to isolate concurrent uploads. |
+| `chunkIndex` | The current chunk number, starting at `0`. |
+| `totalChunks` | The total number of chunks for the file. |
+
+The endpoint should store each chunk by `uploadId` and `chunkIndex`. When `chunkIndex === totalChunks - 1`, merge/finalize the file before returning a successful response. `onSuccess` receives that final HTTP `Response`.
+
+### Express example
+
+```js
+import express from 'express';
+import multer from 'multer';
+import { mkdir, rename } from 'node:fs/promises';
+import path from 'node:path';
+
+const app = express();
+const upload = multer({ dest: 'tmp/chunks' });
+
 app.post('/upload-chunk', upload.single('file'), async (req, res) => {
   const { filename, uploadId, chunkIndex, totalChunks } = req.body;
-  // 1. Save the chunk to a temporary location
-  // 2. If this is the final chunk, await merging/finalization before responding
-  res.status(200).json({ uploadId, filename, chunkIndex, totalChunks });
+
+  if (!req.file || !filename || !uploadId || chunkIndex == null || !totalChunks) {
+    return res.status(400).json({ message: 'Missing chunk upload fields' });
+  }
+
+  const uploadDir = path.join('tmp/uploads', uploadId);
+  await mkdir(uploadDir, { recursive: true });
+
+  const chunkPath = path.join(uploadDir, String(chunkIndex));
+  await rename(req.file.path, chunkPath);
+
+  const isFinalChunk = Number(chunkIndex) === Number(totalChunks) - 1;
+
+  if (isFinalChunk) {
+    // Merge chunks 0..totalChunks - 1 into the final file here.
+    // Only send a 2xx response after the merge/finalization succeeds.
+  }
+
+  return res.status(200).json({ uploadId, filename, chunkIndex, totalChunks });
 });
 ```
+
+## Behavior Notes
+
+- Uploads are sequential: the next chunk starts after the previous chunk succeeds.
+- Progress is updated after each completed chunk, not continuously while a chunk is streaming.
+- Pausing aborts the active request and resumes from the last completed chunk.
+- This package does not persist upload state across browser refreshes yet.
+- This package does not merge chunks on the server; your backend owns storage and finalization.
 
 ## License
 

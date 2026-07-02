@@ -1,6 +1,6 @@
 {
   "name": "react-chunked-upload",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A robust React hook for uploading large files in chunks (Blob slicing) with pause, resume, and retry support.",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
@@ -31,7 +31,12 @@
     "chunked-upload",
     "file-upload",
     "resume",
-    "large-file"
+    "large-file",
+    "chunked-file-upload",
+    "blob",
+    "multipart",
+    "pause",
+    "retry"
   ],
   "author": "Kim Hyeong Kyeom <goww1357@gmail.com>",
   "license": "MIT",
@@ -43,5 +48,13 @@
     "react": "^18.3.0",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0"
+  },
+  "homepage": "https://github.com/Kyeom1997/react-chunked-upload#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kyeom1997/react-chunked-upload.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Kyeom1997/react-chunked-upload/issues"
   }
 }
