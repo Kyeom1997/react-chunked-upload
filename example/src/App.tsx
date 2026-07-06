@@ -18,6 +18,15 @@ function App() {
   } = useChunkedUpload({
     chunkSize: 1024 * 1024 * 5, // 5MB chunks
     uploadUrl: '/api/upload-chunk',
+    headers: {
+      'X-Demo-Client': 'react-chunked-upload-example',
+    },
+    fields: {
+      folderId: 'demo-folder',
+    },
+    onChunkStart: (chunkIndex) => console.log(`Chunk ${chunkIndex} started`),
+    onChunkSuccess: (chunkIndex) => console.log(`Chunk ${chunkIndex} uploaded`),
+    onChunkError: (chunkIndex, err) => console.error(`Chunk ${chunkIndex} failed`, err),
     onSuccess: () => console.log('Upload successful!'),
     onError: (err) => console.error(err),
   });

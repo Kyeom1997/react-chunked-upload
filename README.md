@@ -40,6 +40,15 @@ function App() {
   } = useChunkedUpload({
     chunkSize: 1024 * 1024 * 5, // 5MB chunks
     uploadUrl: 'https://your-api.com/upload-chunk',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+    fields: {
+      folderId: 'invoices',
+    },
+    onChunkStart: (chunkIndex) => console.log(`Chunk ${chunkIndex} started`),
+    onChunkSuccess: (chunkIndex) => console.log(`Chunk ${chunkIndex} uploaded`),
+    onChunkError: (chunkIndex, err) => console.error(`Chunk ${chunkIndex} failed`, err),
     onSuccess: (response) => console.log('Upload complete!', response),
     onError: (err) => console.error('Upload failed', err),
     onProgress: (p) => console.log(`Progress: ${p}%`)
@@ -74,7 +83,12 @@ function App() {
 | --- | --- | --- | --- |
 | `uploadUrl` | `string` | Required | Endpoint that receives each chunk as multipart form data. |
 | `chunkSize` | `number` | `5 * 1024 * 1024` | Chunk size in bytes. Must be greater than `0`. |
+| `headers` | `HeadersInit` | `undefined` | Headers sent with every chunk request. Useful for authorization. Do not set `Content-Type` manually when using `FormData`. |
+| `fields` | `Record<string, string \| Blob>` | `undefined` | Extra multipart fields appended to every chunk request. |
 | `onProgress` | `(progress: number) => void` | `undefined` | Called after each completed chunk with byte-based progress from `0` to `100`. |
+| `onChunkStart` | `(chunkIndex: number) => void` | `undefined` | Called before each chunk request starts. |
+| `onChunkSuccess` | `(chunkIndex: number, response: Response) => void` | `undefined` | Called after each chunk request succeeds. Receives a cloned response. |
+| `onChunkError` | `(chunkIndex: number, error: Error) => void` | `undefined` | Called when a chunk request fails. |
 | `onSuccess` | `(response: Response) => void` | `undefined` | Called after the final chunk succeeds. Receives the final HTTP `Response`. |
 | `onError` | `(error: Error) => void` | `undefined` | Called when validation or a chunk request fails. |
 
@@ -105,6 +119,8 @@ Your backend needs to handle the multipart form data sent by the hook. The hook 
 | `uploadId` | A generated ID for the current upload attempt. Use this to isolate concurrent uploads. |
 | `chunkIndex` | The current chunk number, starting at `0`. |
 | `totalChunks` | The total number of chunks for the file. |
+
+Any `fields` values you provide are appended to the same multipart request, so your backend can receive project-specific metadata such as `folderId` or `userId` alongside each chunk.
 
 The endpoint should store each chunk by `uploadId` and `chunkIndex`. When `chunkIndex === totalChunks - 1`, merge/finalize the file before returning a successful response. `onSuccess` receives that final HTTP `Response`.
 
@@ -150,6 +166,7 @@ app.post('/upload-chunk', upload.single('file'), async (req, res) => {
 - Pausing aborts the active request and resumes from the last completed chunk.
 - This package does not persist upload state across browser refreshes yet.
 - This package does not merge chunks on the server; your backend owns storage and finalization.
+- Custom `headers` are sent with every chunk request, but `Content-Type` should be left to the browser when using `FormData`.
 
 ## License
 

@@ -46,9 +46,14 @@ function useChunkedUpload(options) {
   const {
     chunkSize = 5 * 1024 * 1024,
     uploadUrl,
+    headers,
+    fields,
     onSuccess,
     onError,
-    onProgress
+    onProgress,
+    onChunkStart,
+    onChunkSuccess,
+    onChunkError
   } = options;
   const [state, setState] = (0, import_react.useState)(initialState);
   const sessionRef = (0, import_react.useRef)(null);
@@ -60,7 +65,14 @@ function useChunkedUpload(options) {
   const uploadChunks = (0, import_react.useCallback)(async (runId) => {
     const session = sessionRef.current;
     if (!session || runId !== runIdRef.current) return;
-    const { file, uploadId, chunkSize: sessionChunkSize, uploadUrl: sessionUploadUrl } = session;
+    const {
+      file,
+      uploadId,
+      chunkSize: sessionChunkSize,
+      uploadUrl: sessionUploadUrl,
+      headers: sessionHeaders,
+      fields: sessionFields
+    } = session;
     const totalChunks = Math.max(1, Math.ceil(file.size / sessionChunkSize));
     let finalResponse = null;
     try {
@@ -74,16 +86,24 @@ function useChunkedUpload(options) {
         formData.append("uploadId", uploadId);
         formData.append("chunkIndex", chunkIndex.toString());
         formData.append("totalChunks", totalChunks.toString());
+        if (sessionFields) {
+          for (const [key, value] of Object.entries(sessionFields)) {
+            formData.append(key, value);
+          }
+        }
         const controller = new AbortController();
         abortControllerRef.current = controller;
+        onChunkStart == null ? void 0 : onChunkStart(chunkIndex);
         const response = await fetch(sessionUploadUrl, {
           method: "POST",
+          headers: sessionHeaders,
           body: formData,
           signal: controller.signal
         });
         if (!response.ok) {
           throw new Error(`Chunk upload failed with status: ${response.status}`);
         }
+        onChunkSuccess == null ? void 0 : onChunkSuccess(chunkIndex, response.clone());
         if (runId !== runIdRef.current || isPausedRef.current) return;
         finalResponse = response;
         currentChunkIndexRef.current = chunkIndex + 1;
@@ -113,6 +133,7 @@ function useChunkedUpload(options) {
         return;
       }
       const uploadError = toError(error);
+      onChunkError == null ? void 0 : onChunkError(currentChunkIndexRef.current, uploadError);
       setState((current) => ({
         ...current,
         isUploading: false,
@@ -122,7 +143,7 @@ function useChunkedUpload(options) {
       }));
       onError == null ? void 0 : onError(uploadError);
     }
-  }, [onError, onProgress, onSuccess]);
+  }, [onChunkError, onChunkStart, onChunkSuccess, onError, onProgress, onSuccess]);
   const reportValidationError = (0, import_react.useCallback)((message) => {
     const error = new Error(message);
     setState({
@@ -151,7 +172,9 @@ function useChunkedUpload(options) {
       file,
       uploadId: createUploadId(),
       chunkSize,
-      uploadUrl
+      uploadUrl,
+      headers: headers ? new Headers(headers) : void 0,
+      fields: fields ? { ...fields } : void 0
     };
     currentChunkIndexRef.current = 0;
     isPausedRef.current = false;
@@ -161,7 +184,7 @@ function useChunkedUpload(options) {
       isUploading: true
     });
     void uploadChunks(runIdRef.current);
-  }, [chunkSize, reportValidationError, uploadChunks, uploadUrl]);
+  }, [chunkSize, fields, headers, reportValidationError, uploadChunks, uploadUrl]);
   const pauseUpload = (0, import_react.useCallback)(() => {
     var _a;
     if (!isRunningRef.current) return;

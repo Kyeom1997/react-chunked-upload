@@ -5,12 +5,22 @@ export interface ChunkedUploadOptions {
   chunkSize?: number;
   /** API endpoint that accepts and finalizes uploaded chunks. */
   uploadUrl: string;
+  /** Headers sent with each chunk request. Do not set Content-Type for FormData. */
+  headers?: HeadersInit;
+  /** Extra multipart form fields appended to each chunk request. */
+  fields?: Record<string, string | Blob>;
   /** Callback fired with the final chunk response after the upload completes. */
   onSuccess?: (response: Response) => void;
   /** Callback fired if validation or a chunk upload fails. */
   onError?: (error: Error) => void;
   /** Callback fired after a chunk completes, with byte-based progress (0-100). */
   onProgress?: (progress: number) => void;
+  /** Callback fired before each chunk request starts. */
+  onChunkStart?: (chunkIndex: number) => void;
+  /** Callback fired after each chunk request succeeds. */
+  onChunkSuccess?: (chunkIndex: number, response: Response) => void;
+  /** Callback fired when a chunk request fails. */
+  onChunkError?: (chunkIndex: number, error: Error) => void;
 }
 
 export interface ChunkedUploadState {
@@ -26,6 +36,8 @@ interface UploadSession {
   uploadId: string;
   chunkSize: number;
   uploadUrl: string;
+  headers?: HeadersInit;
+  fields?: Record<string, string | Blob>;
 }
 
 const initialState: ChunkedUploadState = {
@@ -52,9 +64,14 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
   const {
     chunkSize = 5 * 1024 * 1024,
     uploadUrl,
+    headers,
+    fields,
     onSuccess,
     onError,
     onProgress,
+    onChunkStart,
+    onChunkSuccess,
+    onChunkError,
   } = options;
 
   const [state, setState] = useState<ChunkedUploadState>(initialState);
@@ -70,7 +87,14 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
 
     if (!session || runId !== runIdRef.current) return;
 
-    const { file, uploadId, chunkSize: sessionChunkSize, uploadUrl: sessionUploadUrl } = session;
+    const {
+      file,
+      uploadId,
+      chunkSize: sessionChunkSize,
+      uploadUrl: sessionUploadUrl,
+      headers: sessionHeaders,
+      fields: sessionFields,
+    } = session;
     const totalChunks = Math.max(1, Math.ceil(file.size / sessionChunkSize));
     let finalResponse: Response | null = null;
 
@@ -91,11 +115,20 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
         formData.append('chunkIndex', chunkIndex.toString());
         formData.append('totalChunks', totalChunks.toString());
 
+        if (sessionFields) {
+          for (const [key, value] of Object.entries(sessionFields)) {
+            formData.append(key, value);
+          }
+        }
+
         const controller = new AbortController();
         abortControllerRef.current = controller;
 
+        onChunkStart?.(chunkIndex);
+
         const response = await fetch(sessionUploadUrl, {
           method: 'POST',
+          headers: sessionHeaders,
           body: formData,
           signal: controller.signal,
         });
@@ -103,6 +136,8 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
         if (!response.ok) {
           throw new Error(`Chunk upload failed with status: ${response.status}`);
         }
+
+        onChunkSuccess?.(chunkIndex, response.clone());
 
         if (runId !== runIdRef.current || isPausedRef.current) return;
 
@@ -144,6 +179,7 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
       }
 
       const uploadError = toError(error);
+      onChunkError?.(currentChunkIndexRef.current, uploadError);
       setState(current => ({
         ...current,
         isUploading: false,
@@ -153,7 +189,7 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
       }));
       onError?.(uploadError);
     }
-  }, [onError, onProgress, onSuccess]);
+  }, [onChunkError, onChunkStart, onChunkSuccess, onError, onProgress, onSuccess]);
 
   const reportValidationError = useCallback((message: string) => {
     const error = new Error(message);
@@ -187,6 +223,8 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
       uploadId: createUploadId(),
       chunkSize,
       uploadUrl,
+      headers: headers ? new Headers(headers) : undefined,
+      fields: fields ? { ...fields } : undefined,
     };
     currentChunkIndexRef.current = 0;
     isPausedRef.current = false;
@@ -198,7 +236,7 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
     });
 
     void uploadChunks(runIdRef.current);
-  }, [chunkSize, reportValidationError, uploadChunks, uploadUrl]);
+  }, [chunkSize, fields, headers, reportValidationError, uploadChunks, uploadUrl]);
 
   const pauseUpload = useCallback(() => {
     if (!isRunningRef.current) return;
