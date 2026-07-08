@@ -1,6 +1,13 @@
 # react-chunked-upload
 
+[![npm version](https://img.shields.io/npm/v/react-chunked-upload.svg)](https://www.npmjs.com/package/react-chunked-upload)
+[![npm downloads](https://img.shields.io/npm/dm/react-chunked-upload.svg)](https://www.npmjs.com/package/react-chunked-upload)
+[![GitHub stars](https://img.shields.io/github/stars/Kyeom1997/react-chunked-upload?style=flat)](https://github.com/Kyeom1997/react-chunked-upload/stargazers)
+[![license](https://img.shields.io/npm/l/react-chunked-upload.svg)](./LICENSE)
+
 A lightweight React hook for sequential, chunked file uploads with pause, resume, and retry support.
+
+[npm](https://www.npmjs.com/package/react-chunked-upload) | [GitHub](https://github.com/Kyeom1997/react-chunked-upload) | [Report a bug](https://github.com/Kyeom1997/react-chunked-upload/issues/new?template=bug_report.yml) | [Request a feature](https://github.com/Kyeom1997/react-chunked-upload/issues/new?template=feature_request.yml)
 
 ## Why this exists?
 
@@ -167,6 +174,12 @@ app.post('/upload-chunk', upload.single('file'), async (req, res) => {
 - This package does not persist upload state across browser refreshes yet.
 - This package does not merge chunks on the server; your backend owns storage and finalization.
 - Custom `headers` are sent with every chunk request, but `Content-Type` should be left to the browser when using `FormData`.
+
+## Community
+
+Using `react-chunked-upload` in a project? Open a [Show and tell issue](https://github.com/Kyeom1997/react-chunked-upload/issues/new?template=show_and_tell.yml) to share what you built. Real-world use cases help guide compatibility and future releases.
+
+Bug reports and focused feature requests are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) before opening a pull request.
 
 ## License
 

@@ -1,0 +1,23 @@
+name: Show and tell
+description: Share a project using react-chunked-upload.
+title: "[Showcase]: "
+labels: [showcase]
+body:
+  - type: input
+    id: project
+    attributes:
+      label: Project name or URL
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: How are you using react-chunked-upload?
+      description: Tell us about file sizes, backend, storage, or the upload workflow.
+    validations:
+      required: true
+  - type: textarea
+    id: feedback
+    attributes:
+      label: Feedback
+      description: What worked well, and what would make the package more useful?
