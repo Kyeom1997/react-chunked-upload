@@ -60,6 +60,31 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+function getTotalChunks(file: File, chunkSize: number): number {
+  return Math.max(1, Math.ceil(file.size / chunkSize));
+}
+
+/** Lowest chunk index that has not completed yet, or null when none remain. */
+function nextPendingChunk(totalChunks: number, completed: ReadonlySet<number>): number | null {
+  for (let index = 0; index < totalChunks; index += 1) {
+    if (!completed.has(index)) return index;
+  }
+
+  return null;
+}
+
+/** Byte-accurate progress from the set of completed chunks (0-100). */
+function computeProgress(file: File, chunkSize: number, completed: ReadonlySet<number>): number {
+  if (file.size === 0) return completed.size > 0 ? 100 : 0;
+
+  let uploadedBytes = 0;
+  for (const index of completed) {
+    uploadedBytes += Math.min(chunkSize, file.size - index * chunkSize);
+  }
+
+  return Math.round((uploadedBytes / file.size) * 100);
+}
+
 export function useChunkedUpload(options: ChunkedUploadOptions) {
   const {
     chunkSize = 5 * 1024 * 1024,
@@ -76,7 +101,7 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
 
   const [state, setState] = useState<ChunkedUploadState>(initialState);
   const sessionRef = useRef<UploadSession | null>(null);
-  const currentChunkIndexRef = useRef(0);
+  const completedChunksRef = useRef<Set<number>>(new Set());
   const abortControllerRef = useRef<AbortController | null>(null);
   const runIdRef = useRef(0);
   const isRunningRef = useRef(false);
@@ -95,16 +120,18 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
       headers: sessionHeaders,
       fields: sessionFields,
     } = session;
-    const totalChunks = Math.max(1, Math.ceil(file.size / sessionChunkSize));
+    const totalChunks = getTotalChunks(file, sessionChunkSize);
     let finalResponse: Response | null = null;
+    let activeChunkIndex = 0;
 
     try {
-      while (
-        currentChunkIndexRef.current < totalChunks &&
-        runId === runIdRef.current &&
-        !isPausedRef.current
-      ) {
-        const chunkIndex = currentChunkIndexRef.current;
+      while (runId === runIdRef.current && !isPausedRef.current) {
+        const chunkIndex = nextPendingChunk(totalChunks, completedChunksRef.current);
+
+        if (chunkIndex === null) break;
+
+        activeChunkIndex = chunkIndex;
+
         const start = chunkIndex * sessionChunkSize;
         const end = Math.min(start + sessionChunkSize, file.size);
         const formData = new FormData();
@@ -142,10 +169,9 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
         if (runId !== runIdRef.current || isPausedRef.current) return;
 
         finalResponse = response;
-        currentChunkIndexRef.current = chunkIndex + 1;
+        completedChunksRef.current.add(chunkIndex);
 
-        const uploadedBytes = Math.min(currentChunkIndexRef.current * sessionChunkSize, file.size);
-        const progress = file.size === 0 ? 100 : Math.round((uploadedBytes / file.size) * 100);
+        const progress = computeProgress(file, sessionChunkSize, completedChunksRef.current);
         setState(current => ({ ...current, progress }));
         onProgress?.(progress);
       }
@@ -153,7 +179,7 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
       if (
         runId === runIdRef.current &&
         !isPausedRef.current &&
-        currentChunkIndexRef.current >= totalChunks &&
+        completedChunksRef.current.size >= totalChunks &&
         finalResponse
       ) {
         isRunningRef.current = false;
@@ -179,7 +205,7 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
       }
 
       const uploadError = toError(error);
-      onChunkError?.(currentChunkIndexRef.current, uploadError);
+      onChunkError?.(activeChunkIndex, uploadError);
       setState(current => ({
         ...current,
         isUploading: false,
@@ -206,7 +232,7 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
     sessionRef.current = null;
-    currentChunkIndexRef.current = 0;
+    completedChunksRef.current = new Set();
 
     if (!Number.isFinite(chunkSize) || chunkSize <= 0) {
       reportValidationError('chunkSize must be a finite number greater than 0.');
@@ -226,7 +252,6 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
       headers: headers ? new Headers(headers) : undefined,
       fields: fields ? { ...fields } : undefined,
     };
-    currentChunkIndexRef.current = 0;
     isPausedRef.current = false;
     isRunningRef.current = true;
 
@@ -254,8 +279,8 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
 
     if (!session || isRunningRef.current) return;
 
-    const totalChunks = Math.max(1, Math.ceil(session.file.size / session.chunkSize));
-    if (currentChunkIndexRef.current >= totalChunks) return;
+    const totalChunks = getTotalChunks(session.file, session.chunkSize);
+    if (completedChunksRef.current.size >= totalChunks) return;
 
     runIdRef.current += 1;
     isPausedRef.current = false;
