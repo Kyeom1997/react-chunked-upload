@@ -1,5 +1,13 @@
 // src/useChunkedUpload.ts
 import { useCallback, useEffect, useRef, useState } from "react";
+var ChunkUploadError = class extends Error {
+  constructor(message, chunkIndex, status) {
+    super(message);
+    this.name = "ChunkUploadError";
+    this.chunkIndex = chunkIndex;
+    this.status = status;
+  }
+};
 var initialState = {
   progress: 0,
   isUploading: false,
@@ -16,12 +24,53 @@ function createUploadId() {
 function toError(error) {
   return error instanceof Error ? error : new Error(String(error));
 }
+function getTotalChunks(file, chunkSize) {
+  return Math.max(1, Math.ceil(file.size / chunkSize));
+}
+function nextPendingChunk(totalChunks, completed) {
+  for (let index = 0; index < totalChunks; index += 1) {
+    if (!completed.has(index)) return index;
+  }
+  return null;
+}
+function computeProgress(file, chunkSize, completed) {
+  if (file.size === 0) return completed.size > 0 ? 100 : 0;
+  let uploadedBytes = 0;
+  for (const index of completed) {
+    uploadedBytes += Math.min(chunkSize, file.size - index * chunkSize);
+  }
+  return Math.round(uploadedBytes / file.size * 100);
+}
+function isRetryableError(error) {
+  if (error instanceof ChunkUploadError) {
+    if (error.status === void 0) return true;
+    return error.status >= 500 || error.status === 408 || error.status === 429;
+  }
+  return error instanceof TypeError;
+}
+function resolveRetryDelay(retryDelay, attempt, error) {
+  if (typeof retryDelay === "function") return Math.max(0, retryDelay(attempt, error));
+  if (typeof retryDelay === "number") return Math.max(0, retryDelay);
+  return Math.min(500 * 2 ** (attempt - 1), 1e4);
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function interruptedError() {
+  return new DOMException("The upload was interrupted.", "AbortError");
+}
+function isAbortError(error) {
+  return typeof error === "object" && error !== null && error.name === "AbortError";
+}
 function useChunkedUpload(options) {
   const {
     chunkSize = 5 * 1024 * 1024,
     uploadUrl,
     headers,
     fields,
+    retries = 0,
+    retryDelay,
+    timeout,
     onSuccess,
     onError,
     onProgress,
@@ -31,7 +80,7 @@ function useChunkedUpload(options) {
   } = options;
   const [state, setState] = useState(initialState);
   const sessionRef = useRef(null);
-  const currentChunkIndexRef = useRef(0);
+  const completedChunksRef = useRef(/* @__PURE__ */ new Set());
   const abortControllerRef = useRef(null);
   const runIdRef = useRef(0);
   const isRunningRef = useRef(false);
@@ -45,48 +94,93 @@ function useChunkedUpload(options) {
       chunkSize: sessionChunkSize,
       uploadUrl: sessionUploadUrl,
       headers: sessionHeaders,
-      fields: sessionFields
+      fields: sessionFields,
+      retries: sessionRetries,
+      retryDelay: sessionRetryDelay,
+      timeout: sessionTimeout
     } = session;
-    const totalChunks = Math.max(1, Math.ceil(file.size / sessionChunkSize));
+    const totalChunks = getTotalChunks(file, sessionChunkSize);
     let finalResponse = null;
-    try {
-      while (currentChunkIndexRef.current < totalChunks && runId === runIdRef.current && !isPausedRef.current) {
-        const chunkIndex = currentChunkIndexRef.current;
-        const start = chunkIndex * sessionChunkSize;
-        const end = Math.min(start + sessionChunkSize, file.size);
-        const formData = new FormData();
-        formData.append("file", file.slice(start, end));
-        formData.append("filename", file.name);
-        formData.append("uploadId", uploadId);
-        formData.append("chunkIndex", chunkIndex.toString());
-        formData.append("totalChunks", totalChunks.toString());
-        if (sessionFields) {
-          for (const [key, value] of Object.entries(sessionFields)) {
-            formData.append(key, value);
-          }
+    const assertActive = () => {
+      if (runId !== runIdRef.current || isPausedRef.current) {
+        throw interruptedError();
+      }
+    };
+    const uploadChunkWithRetries = async (chunkIndex) => {
+      const start = chunkIndex * sessionChunkSize;
+      const end = Math.min(start + sessionChunkSize, file.size);
+      const formData = new FormData();
+      formData.append("file", file.slice(start, end));
+      formData.append("filename", file.name);
+      formData.append("uploadId", uploadId);
+      formData.append("chunkIndex", chunkIndex.toString());
+      formData.append("totalChunks", totalChunks.toString());
+      if (sessionFields) {
+        for (const [key, value] of Object.entries(sessionFields)) {
+          formData.append(key, value);
         }
+      }
+      for (let attempt = 0; ; attempt += 1) {
         const controller = new AbortController();
         abortControllerRef.current = controller;
-        onChunkStart == null ? void 0 : onChunkStart(chunkIndex);
-        const response = await fetch(sessionUploadUrl, {
-          method: "POST",
-          headers: sessionHeaders,
-          body: formData,
-          signal: controller.signal
-        });
-        if (!response.ok) {
-          throw new Error(`Chunk upload failed with status: ${response.status}`);
+        let timedOut = false;
+        const timer = sessionTimeout !== void 0 ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, sessionTimeout) : void 0;
+        try {
+          const resolvedHeaders = typeof sessionHeaders === "function" ? await sessionHeaders() : sessionHeaders;
+          assertActive();
+          onChunkStart == null ? void 0 : onChunkStart(chunkIndex);
+          const response = await fetch(sessionUploadUrl, {
+            method: "POST",
+            headers: resolvedHeaders,
+            body: formData,
+            signal: controller.signal
+          });
+          if (!response.ok) {
+            throw new ChunkUploadError(
+              `Chunk upload failed with status: ${response.status}`,
+              chunkIndex,
+              response.status
+            );
+          }
+          return response;
+        } catch (error) {
+          let failure = error;
+          if (isAbortError(error)) {
+            if (!timedOut || runId !== runIdRef.current) throw error;
+            failure = new ChunkUploadError(
+              `Chunk upload timed out after ${sessionTimeout}ms`,
+              chunkIndex
+            );
+          }
+          const uploadError = toError(failure);
+          onChunkError == null ? void 0 : onChunkError(chunkIndex, uploadError);
+          if (attempt >= sessionRetries || !isRetryableError(uploadError)) {
+            throw uploadError;
+          }
+          await sleep(resolveRetryDelay(sessionRetryDelay, attempt + 1, uploadError));
+          assertActive();
+        } finally {
+          if (timer !== void 0) clearTimeout(timer);
         }
+      }
+    };
+    try {
+      while (runId === runIdRef.current && !isPausedRef.current) {
+        const chunkIndex = nextPendingChunk(totalChunks, completedChunksRef.current);
+        if (chunkIndex === null) break;
+        const response = await uploadChunkWithRetries(chunkIndex);
         onChunkSuccess == null ? void 0 : onChunkSuccess(chunkIndex, response.clone());
         if (runId !== runIdRef.current || isPausedRef.current) return;
         finalResponse = response;
-        currentChunkIndexRef.current = chunkIndex + 1;
-        const uploadedBytes = Math.min(currentChunkIndexRef.current * sessionChunkSize, file.size);
-        const progress = file.size === 0 ? 100 : Math.round(uploadedBytes / file.size * 100);
+        completedChunksRef.current.add(chunkIndex);
+        const progress = computeProgress(file, sessionChunkSize, completedChunksRef.current);
         setState((current) => ({ ...current, progress }));
         onProgress == null ? void 0 : onProgress(progress);
       }
-      if (runId === runIdRef.current && !isPausedRef.current && currentChunkIndexRef.current >= totalChunks && finalResponse) {
+      if (runId === runIdRef.current && !isPausedRef.current && completedChunksRef.current.size >= totalChunks && finalResponse) {
         isRunningRef.current = false;
         abortControllerRef.current = null;
         setState((current) => ({
@@ -103,11 +197,10 @@ function useChunkedUpload(options) {
       if (runId !== runIdRef.current) return;
       isRunningRef.current = false;
       abortControllerRef.current = null;
-      if (error instanceof Error && error.name === "AbortError") {
+      if (isAbortError(error)) {
         return;
       }
       const uploadError = toError(error);
-      onChunkError == null ? void 0 : onChunkError(currentChunkIndexRef.current, uploadError);
       setState((current) => ({
         ...current,
         isUploading: false,
@@ -120,20 +213,16 @@ function useChunkedUpload(options) {
   }, [onChunkError, onChunkStart, onChunkSuccess, onError, onProgress, onSuccess]);
   const reportValidationError = useCallback((message) => {
     const error = new Error(message);
-    setState({
-      ...initialState,
-      isError: true
-    });
+    setState((current) => ({
+      ...current,
+      isUploading: false,
+      isError: true,
+      isSuccess: false
+    }));
     onError == null ? void 0 : onError(error);
   }, [onError]);
   const startUpload = useCallback((file) => {
     var _a;
-    runIdRef.current += 1;
-    isRunningRef.current = false;
-    (_a = abortControllerRef.current) == null ? void 0 : _a.abort();
-    abortControllerRef.current = null;
-    sessionRef.current = null;
-    currentChunkIndexRef.current = 0;
     if (!Number.isFinite(chunkSize) || chunkSize <= 0) {
       reportValidationError("chunkSize must be a finite number greater than 0.");
       return;
@@ -142,15 +231,26 @@ function useChunkedUpload(options) {
       reportValidationError("uploadUrl must not be empty.");
       return;
     }
+    if (!Number.isInteger(retries) || retries < 0) {
+      reportValidationError("retries must be a non-negative integer.");
+      return;
+    }
+    runIdRef.current += 1;
+    isRunningRef.current = false;
+    (_a = abortControllerRef.current) == null ? void 0 : _a.abort();
+    abortControllerRef.current = null;
+    completedChunksRef.current = /* @__PURE__ */ new Set();
     sessionRef.current = {
       file,
       uploadId: createUploadId(),
       chunkSize,
       uploadUrl,
-      headers: headers ? new Headers(headers) : void 0,
-      fields: fields ? { ...fields } : void 0
+      headers: typeof headers === "function" ? headers : headers ? new Headers(headers) : void 0,
+      fields: fields ? { ...fields } : void 0,
+      retries,
+      retryDelay,
+      timeout
     };
-    currentChunkIndexRef.current = 0;
     isPausedRef.current = false;
     isRunningRef.current = true;
     setState({
@@ -158,7 +258,7 @@ function useChunkedUpload(options) {
       isUploading: true
     });
     void uploadChunks(runIdRef.current);
-  }, [chunkSize, fields, headers, reportValidationError, uploadChunks, uploadUrl]);
+  }, [chunkSize, fields, headers, reportValidationError, retries, retryDelay, timeout, uploadChunks, uploadUrl]);
   const pauseUpload = useCallback(() => {
     var _a;
     if (!isRunningRef.current) return;
@@ -172,8 +272,8 @@ function useChunkedUpload(options) {
   const resumeUpload = useCallback(() => {
     const session = sessionRef.current;
     if (!session || isRunningRef.current) return;
-    const totalChunks = Math.max(1, Math.ceil(session.file.size / session.chunkSize));
-    if (currentChunkIndexRef.current >= totalChunks) return;
+    const totalChunks = getTotalChunks(session.file, session.chunkSize);
+    if (completedChunksRef.current.size >= totalChunks) return;
     runIdRef.current += 1;
     isPausedRef.current = false;
     isRunningRef.current = true;
@@ -186,6 +286,17 @@ function useChunkedUpload(options) {
     }));
     void uploadChunks(runIdRef.current);
   }, [uploadChunks]);
+  const cancelUpload = useCallback(() => {
+    var _a;
+    runIdRef.current += 1;
+    isRunningRef.current = false;
+    isPausedRef.current = false;
+    (_a = abortControllerRef.current) == null ? void 0 : _a.abort();
+    abortControllerRef.current = null;
+    sessionRef.current = null;
+    completedChunksRef.current = /* @__PURE__ */ new Set();
+    setState(initialState);
+  }, []);
   useEffect(() => () => {
     var _a;
     runIdRef.current += 1;
@@ -197,10 +308,12 @@ function useChunkedUpload(options) {
     pauseUpload,
     resumeUpload,
     retryUpload: resumeUpload,
+    cancelUpload,
     ...state
   };
 }
 export {
+  ChunkUploadError,
   useChunkedUpload
 };
 //# sourceMappingURL=index.mjs.map
