@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useChunkedUpload } from './useChunkedUpload';
+import { ChunkUploadError, useChunkedUpload } from './useChunkedUpload';
 
 function createFile(size: number, name = 'video.mp4') {
   return new File([new Uint8Array(size)], name, { type: 'video/mp4' });
@@ -440,5 +440,206 @@ describe('useChunkedUpload pause/resume/retry semantics', () => {
 
     await waitFor(() => expect(calls).toHaveLength(3));
     expect(chunkIndexOf(calls[2])).toBe('1');
+  });
+});
+
+describe('useChunkedUpload retry, dynamic headers, and timeout', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('retries retryable failures up to the configured attempts', async () => {
+    const { fetchMock, calls } = createDeferredFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const onChunkError = vi.fn();
+
+    const { result } = renderHook(() => useChunkedUpload({
+      uploadUrl: '/api/upload-chunk',
+      chunkSize: 2,
+      retries: 2,
+      retryDelay: () => 0,
+      onChunkError,
+    }));
+
+    act(() => {
+      result.current.startUpload(createFile(4));
+    });
+
+    // Chunk 0 fails twice with 500, then succeeds on the third attempt.
+    await waitFor(() => expect(calls).toHaveLength(1));
+    await act(async () => {
+      calls[0].resolve(new Response('nope', { status: 500 }));
+    });
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(chunkIndexOf(calls[1])).toBe('0');
+    await act(async () => {
+      calls[1].resolve(new Response('nope', { status: 500 }));
+    });
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(chunkIndexOf(calls[2])).toBe('0');
+    await act(async () => {
+      calls[2].resolve();
+    });
+
+    await waitFor(() => expect(calls).toHaveLength(4));
+    expect(chunkIndexOf(calls[3])).toBe('1');
+    await act(async () => {
+      calls[3].resolve();
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(onChunkError).toHaveBeenCalledTimes(2);
+    expect(result.current.isError).toBe(false);
+  });
+
+  it('does not retry non-retryable 4xx responses', async () => {
+    const { fetchMock, calls } = createDeferredFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const onError = vi.fn();
+
+    const { result } = renderHook(() => useChunkedUpload({
+      uploadUrl: '/api/upload-chunk',
+      chunkSize: 2,
+      retries: 3,
+      retryDelay: () => 0,
+      onError,
+    }));
+
+    act(() => {
+      result.current.startUpload(createFile(4));
+    });
+
+    await waitFor(() => expect(calls).toHaveLength(1));
+    await act(async () => {
+      calls[0].resolve(new Response('unauthorized', { status: 401 }));
+    });
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(calls).toHaveLength(1);
+    expect(onError).toHaveBeenCalledTimes(1);
+
+    const error = onError.mock.calls[0][0];
+    expect(error).toBeInstanceOf(ChunkUploadError);
+    expect((error as ChunkUploadError).status).toBe(401);
+    expect((error as ChunkUploadError).chunkIndex).toBe(0);
+  });
+
+  it('surfaces the error after retries are exhausted', async () => {
+    const { fetchMock, calls } = createDeferredFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const onError = vi.fn();
+    const onChunkError = vi.fn();
+
+    const { result } = renderHook(() => useChunkedUpload({
+      uploadUrl: '/api/upload-chunk',
+      chunkSize: 2,
+      retries: 1,
+      retryDelay: () => 0,
+      onError,
+      onChunkError,
+    }));
+
+    act(() => {
+      result.current.startUpload(createFile(2));
+    });
+
+    await waitFor(() => expect(calls).toHaveLength(1));
+    await act(async () => {
+      calls[0].resolve(new Response('nope', { status: 503 }));
+    });
+    await waitFor(() => expect(calls).toHaveLength(2));
+    await act(async () => {
+      calls[1].resolve(new Response('nope', { status: 503 }));
+    });
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(onChunkError).toHaveBeenCalledTimes(2);
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it('evaluates function headers before every chunk request', async () => {
+    const { fetchMock, calls } = createDeferredFetch();
+    vi.stubGlobal('fetch', fetchMock);
+
+    let token = 0;
+    const { result } = renderHook(() => useChunkedUpload({
+      uploadUrl: '/api/upload-chunk',
+      chunkSize: 2,
+      headers: async () => ({ Authorization: `Bearer ${token++}` }),
+    }));
+
+    act(() => {
+      result.current.startUpload(createFile(4));
+    });
+
+    await waitFor(() => expect(calls).toHaveLength(1));
+    await act(async () => {
+      calls[0].resolve();
+    });
+    await waitFor(() => expect(calls).toHaveLength(2));
+    await act(async () => {
+      calls[1].resolve();
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    // A fresh token was fetched for each chunk request.
+    expect((calls[0].init.headers as Record<string, string>).Authorization).toBe('Bearer 0');
+    expect((calls[1].init.headers as Record<string, string>).Authorization).toBe('Bearer 1');
+  });
+
+  it('treats a timed-out chunk as a retryable failure', async () => {
+    const { fetchMock, calls } = createDeferredFetch();
+    vi.stubGlobal('fetch', fetchMock);
+
+    // Generous timeout so the retry attempt can be resolved by the test
+    // before it also times out (waitFor polls on a ~50ms interval).
+    const { result } = renderHook(() => useChunkedUpload({
+      uploadUrl: '/api/upload-chunk',
+      chunkSize: 2,
+      timeout: 250,
+      retries: 1,
+      retryDelay: () => 0,
+    }));
+
+    act(() => {
+      result.current.startUpload(createFile(2));
+    });
+
+    // The first attempt hangs until the timeout aborts it.
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[0].signal?.aborted).toBe(true);
+
+    await act(async () => {
+      calls[1].resolve();
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  });
+
+  it('reports a timeout error when no retries remain', async () => {
+    const { fetchMock, calls } = createDeferredFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const onError = vi.fn();
+
+    const { result } = renderHook(() => useChunkedUpload({
+      uploadUrl: '/api/upload-chunk',
+      chunkSize: 2,
+      timeout: 15,
+      onError,
+    }));
+
+    act(() => {
+      result.current.startUpload(createFile(2));
+    });
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(calls).toHaveLength(1);
+
+    const error = onError.mock.calls[0][0];
+    expect(error).toBeInstanceOf(ChunkUploadError);
+    expect((error as ChunkUploadError).status).toBeUndefined();
+    expect((error as Error).message).toContain('timed out');
   });
 });
