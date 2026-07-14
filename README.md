@@ -5,13 +5,14 @@
 [![GitHub stars](https://img.shields.io/github/stars/Kyeom1997/react-chunked-upload?style=flat)](https://github.com/Kyeom1997/react-chunked-upload/stargazers)
 [![license](https://img.shields.io/npm/l/react-chunked-upload.svg)](./LICENSE)
 
-A lightweight React hook for chunked large-file uploads with pause, resume, retry, progress, custom headers, and multipart fields.
+A lightweight React hook for chunked large-file uploads with pause, resume, cancel, automatic retries, timeouts, progress, dynamic headers, and multipart fields.
 
 [npm](https://www.npmjs.com/package/react-chunked-upload) | [GitHub](https://github.com/Kyeom1997/react-chunked-upload) | [Report a bug](https://github.com/Kyeom1997/react-chunked-upload/issues/new?template=bug_report.yml) | [Request a feature](https://github.com/Kyeom1997/react-chunked-upload/issues/new?template=feature_request.yml)
 
 - Small, headless React hook with no runtime dependencies
 - Sequential chunk uploads using the browser `File` and `Blob` APIs
-- Pause, resume, failed-chunk retry, and byte-based progress
+- Pause, resume, cancel, automatic retry with backoff, and byte-based progress
+- Static or per-request async headers for expiring credentials
 - Bring your own upload endpoint, authentication, storage, and UI
 
 ## Installation
@@ -55,6 +56,7 @@ function App() {
     pauseUpload, 
     resumeUpload,
     retryUpload,
+    cancelUpload,
     progress, 
     isUploading, 
     isPaused, 
@@ -63,9 +65,13 @@ function App() {
   } = useChunkedUpload({
     chunkSize: 1024 * 1024 * 5, // 5MB chunks
     uploadUrl: 'https://your-api.com/upload-chunk',
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
+    retries: 3, // auto-retry each chunk up to 3 times with backoff
+    timeout: 30_000, // abort a chunk request that hangs for 30s
+    // Static headers, or an async function evaluated before every chunk
+    // request — handy when tokens can expire during a long upload.
+    headers: async () => ({
+      Authorization: `Bearer ${await getFreshToken()}`,
+    }),
     fields: {
       folderId: 'invoices',
     },
@@ -88,6 +94,7 @@ function App() {
       {isUploading && <button onClick={pauseUpload}>Pause</button>}
       {isPaused && <button onClick={resumeUpload}>Resume</button>}
       {isError && <button onClick={retryUpload}>Retry failed chunk</button>}
+      {(isUploading || isPaused) && <button onClick={cancelUpload}>Cancel</button>}
       
       <div>Progress: {progress}%</div>
       {isSuccess && <div>Upload Successful! 🎉</div>}
@@ -106,14 +113,17 @@ function App() {
 | --- | --- | --- | --- |
 | `uploadUrl` | `string` | Required | Endpoint that receives each chunk as multipart form data. |
 | `chunkSize` | `number` | `5 * 1024 * 1024` | Chunk size in bytes. Must be greater than `0`. |
-| `headers` | `HeadersInit` | `undefined` | Headers sent with every chunk request. Useful for authorization. Do not set `Content-Type` manually when using `FormData`. |
+| `headers` | `HeadersInit \| () => HeadersInit \| Promise<HeadersInit>` | `undefined` | Headers sent with every chunk request. A function is evaluated before every chunk attempt, so expiring tokens can be refreshed mid-upload. Do not set `Content-Type` manually when using `FormData`. |
 | `fields` | `Record<string, string \| Blob>` | `undefined` | Extra multipart fields appended to every chunk request. |
+| `retries` | `number` | `0` | Automatic retry attempts per chunk after the first failure. Only network errors, timeouts, HTTP 5xx, 408, and 429 are retried; other 4xx responses fail immediately. |
+| `retryDelay` | `number \| (attempt: number, error: Error) => number` | Exponential backoff | Delay in ms before retry attempt N (1-based). Defaults to 500ms doubling per attempt, capped at 10s. |
+| `timeout` | `number` | `undefined` | Per-attempt timeout in ms. A timed-out chunk request is aborted and counts as a retryable failure. |
 | `onProgress` | `(progress: number) => void` | `undefined` | Called after each completed chunk with byte-based progress from `0` to `100`. |
-| `onChunkStart` | `(chunkIndex: number) => void` | `undefined` | Called before each chunk request starts. |
+| `onChunkStart` | `(chunkIndex: number) => void` | `undefined` | Called before each chunk request attempt starts (once per retry attempt). |
 | `onChunkSuccess` | `(chunkIndex: number, response: Response) => void` | `undefined` | Called after each chunk request succeeds. Receives a cloned response. |
-| `onChunkError` | `(chunkIndex: number, error: Error) => void` | `undefined` | Called when a chunk request fails. |
+| `onChunkError` | `(chunkIndex: number, error: Error) => void` | `undefined` | Called for each failed chunk request attempt, including attempts that will be retried. |
 | `onSuccess` | `(response: Response) => void` | `undefined` | Called after the final chunk succeeds. Receives the final HTTP `Response`. |
-| `onError` | `(error: Error) => void` | `undefined` | Called when validation or a chunk request fails. |
+| `onError` | `(error: Error) => void` | `undefined` | Called when validation fails or a chunk exhausts its retries. Chunk failures surface as `ChunkUploadError` with `chunkIndex` and `status` (when an HTTP response was received). |
 
 ### Return value
 
@@ -123,6 +133,7 @@ function App() {
 | `pauseUpload` | `() => void` | Aborts the in-flight request and pauses before the next chunk. |
 | `resumeUpload` | `() => void` | Continues from the last completed chunk. |
 | `retryUpload` | `() => void` | Retries from the failed chunk. Currently equivalent to `resumeUpload`. |
+| `cancelUpload` | `() => void` | Aborts the in-flight request, discards the session, and resets all state. A canceled upload cannot be resumed. |
 | `progress` | `number` | Upload progress from `0` to `100`. |
 | `isUploading` | `boolean` | `true` while a chunk request is active. |
 | `isPaused` | `boolean` | `true` after pausing an active upload. |
@@ -145,7 +156,11 @@ Your backend needs to handle the multipart form data sent by the hook. The hook 
 
 Any `fields` values you provide are appended to the same multipart request, so your backend can receive project-specific metadata such as `folderId` or `userId` alongside each chunk.
 
-The endpoint should store each chunk by `uploadId` and `chunkIndex`. When `chunkIndex === totalChunks - 1`, merge/finalize the file before returning a successful response. `onSuccess` receives that final HTTP `Response`.
+The endpoint should store each chunk by `uploadId` and `chunkIndex`. When every chunk from `0` to `totalChunks - 1` has been stored, merge/finalize the file before returning a successful response. Prefer checking that all chunks exist over reacting to `chunkIndex === totalChunks - 1`: the hook may re-send a chunk, so the final index can arrive more than once.
+
+### Idempotency requirement
+
+Your endpoint must treat `(uploadId, chunkIndex)` as an idempotent key: receiving the same chunk twice must be safe and must not duplicate data. If `pauseUpload()` is called while a chunk response is in flight, the hook does not record that chunk as completed and re-sends it on resume. In that case `onChunkSuccess` also fires more than once for the same chunk index. Storing each chunk at a path derived from `uploadId` and `chunkIndex` (overwriting on re-receive), as the Express example does, satisfies this naturally.
 
 ### Express example
 
@@ -154,7 +169,7 @@ See [examples/express-server](./examples/express-server) for a runnable Express 
 ```js
 import express from 'express';
 import multer from 'multer';
-import { mkdir, rename } from 'node:fs/promises';
+import { mkdir, readdir, rename } from 'node:fs/promises';
 import path from 'node:path';
 
 const app = express();
@@ -170,12 +185,14 @@ app.post('/upload-chunk', upload.single('file'), async (req, res) => {
   const uploadDir = path.join('tmp/uploads', uploadId);
   await mkdir(uploadDir, { recursive: true });
 
+  // Overwriting on re-receive keeps (uploadId, chunkIndex) idempotent.
   const chunkPath = path.join(uploadDir, String(chunkIndex));
   await rename(req.file.path, chunkPath);
 
-  const isFinalChunk = Number(chunkIndex) === Number(totalChunks) - 1;
+  const received = await readdir(uploadDir);
+  const hasAllChunks = received.length === Number(totalChunks);
 
-  if (isFinalChunk) {
+  if (hasAllChunks) {
     // Merge chunks 0..totalChunks - 1 into the final file here.
     // Only send a 2xx response after the merge/finalization succeeds.
   }
@@ -188,7 +205,11 @@ app.post('/upload-chunk', upload.single('file'), async (req, res) => {
 
 - Uploads are sequential: the next chunk starts after the previous chunk succeeds.
 - Progress is updated after each completed chunk, not continuously while a chunk is streaming.
-- Pausing aborts the active request and resumes from the last completed chunk.
+- Pausing aborts the active request and resumes from the last completed chunk. A chunk whose response was in flight when you paused is re-sent on resume, so servers must treat `(uploadId, chunkIndex)` idempotently (see Idempotency requirement above).
+- Automatic retries are opt-in (`retries` defaults to `0`). Retryable failures are network errors, timeouts, HTTP 5xx, 408, and 429; other 4xx responses fail immediately. `onChunkError` fires for every failed attempt; `onError` fires once when a chunk gives up.
+- `timeout` aborts a hung chunk request and treats it as a retryable failure. Pause, cancel, and unmount aborts are never retried.
+- A `headers` function is evaluated before every chunk attempt; a static `headers` value is snapshotted when the upload starts.
+- Calling `startUpload` with invalid options reports an error but leaves a paused session resumable.
 - This package does not persist upload state across browser refreshes yet.
 - This package does not merge chunks on the server; your backend owns storage and finalization.
 - Custom `headers` are sent with every chunk request, but `Content-Type` should be left to the browser when using `FormData`.
