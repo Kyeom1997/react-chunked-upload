@@ -355,4 +355,90 @@ describe('useChunkedUpload pause/resume/retry semantics', () => {
     expect(calls[1].body.get('filename')).toBe('second.mp4');
     expect(calls[1].body.get('uploadId')).not.toBe(calls[0].body.get('uploadId'));
   });
+
+  it('cancelUpload aborts, discards the session, and resets state', async () => {
+    const { fetchMock, calls } = createDeferredFetch();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { result } = renderHook(() => useChunkedUpload({
+      uploadUrl: '/api/upload-chunk',
+      chunkSize: 2,
+    }));
+
+    act(() => {
+      result.current.startUpload(createFile(6));
+    });
+
+    await waitFor(() => expect(calls).toHaveLength(1));
+    await act(async () => {
+      calls[0].resolve();
+    });
+    await waitFor(() => expect(result.current.progress).toBe(33));
+
+    act(() => {
+      result.current.cancelUpload();
+    });
+
+    expect(calls[1].signal?.aborted).toBe(true);
+    expect(result.current.progress).toBe(0);
+    expect(result.current.isUploading).toBe(false);
+    expect(result.current.isPaused).toBe(false);
+
+    // A canceled session cannot be resumed.
+    act(() => {
+      result.current.resumeUpload();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('an invalid startUpload call does not destroy a paused session', async () => {
+    const { fetchMock, calls } = createDeferredFetch();
+    vi.stubGlobal('fetch', fetchMock);
+    const onError = vi.fn();
+
+    const { result, rerender } = renderHook(
+      ({ url }: { url: string }) => useChunkedUpload({
+        uploadUrl: url,
+        chunkSize: 2,
+        onError,
+      }),
+      { initialProps: { url: '/api/upload-chunk' } },
+    );
+
+    act(() => {
+      result.current.startUpload(createFile(4));
+    });
+
+    await waitFor(() => expect(calls).toHaveLength(1));
+    await act(async () => {
+      calls[0].resolve();
+    });
+    await waitFor(() => expect(result.current.progress).toBe(50));
+
+    act(() => {
+      result.current.pauseUpload();
+    });
+
+    // uploadUrl becomes invalid, then a stray startUpload is issued.
+    rerender({ url: ' ' });
+    act(() => {
+      result.current.startUpload(createFile(4));
+    });
+
+    expect(onError).toHaveBeenCalledWith(expect.any(Error));
+    expect(result.current.isError).toBe(true);
+    expect(result.current.progress).toBe(50);
+
+    // The paused session is still resumable.
+    rerender({ url: '/api/upload-chunk' });
+    act(() => {
+      result.current.resumeUpload();
+    });
+
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(chunkIndexOf(calls[2])).toBe('1');
+  });
 });

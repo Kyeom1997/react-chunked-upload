@@ -219,21 +219,20 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
 
   const reportValidationError = useCallback((message: string) => {
     const error = new Error(message);
-    setState({
-      ...initialState,
+    // Flag the error without resetting progress or pause state, so a
+    // paused session survives an invalid startUpload call.
+    setState(current => ({
+      ...current,
+      isUploading: false,
       isError: true,
-    });
+      isSuccess: false,
+    }));
     onError?.(error);
   }, [onError]);
 
   const startUpload = useCallback((file: File) => {
-    runIdRef.current += 1;
-    isRunningRef.current = false;
-    abortControllerRef.current?.abort();
-    abortControllerRef.current = null;
-    sessionRef.current = null;
-    completedChunksRef.current = new Set();
-
+    // Validate before tearing anything down so an invalid call cannot
+    // destroy a paused session that could still be resumed.
     if (!Number.isFinite(chunkSize) || chunkSize <= 0) {
       reportValidationError('chunkSize must be a finite number greater than 0.');
       return;
@@ -243,6 +242,12 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
       reportValidationError('uploadUrl must not be empty.');
       return;
     }
+
+    runIdRef.current += 1;
+    isRunningRef.current = false;
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    completedChunksRef.current = new Set();
 
     sessionRef.current = {
       file,
@@ -295,6 +300,17 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
     void uploadChunks(runIdRef.current);
   }, [uploadChunks]);
 
+  const cancelUpload = useCallback(() => {
+    runIdRef.current += 1;
+    isRunningRef.current = false;
+    isPausedRef.current = false;
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    sessionRef.current = null;
+    completedChunksRef.current = new Set();
+    setState(initialState);
+  }, []);
+
   useEffect(() => () => {
     runIdRef.current += 1;
     isRunningRef.current = false;
@@ -306,6 +322,7 @@ export function useChunkedUpload(options: ChunkedUploadOptions) {
     pauseUpload,
     resumeUpload,
     retryUpload: resumeUpload,
+    cancelUpload,
     ...state,
   };
 }
