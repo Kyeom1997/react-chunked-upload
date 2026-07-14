@@ -133,6 +133,8 @@ The endpoint should store each chunk by `uploadId` and `chunkIndex`. When `chunk
 
 ### Express example
 
+See [examples/express-server](./examples/express-server) for a runnable Express server that stores chunks and merges the final file.
+
 ```js
 import express from 'express';
 import multer from 'multer';
@@ -174,6 +176,16 @@ app.post('/upload-chunk', upload.single('file'), async (req, res) => {
 - This package does not persist upload state across browser refreshes yet.
 - This package does not merge chunks on the server; your backend owns storage and finalization.
 - Custom `headers` are sent with every chunk request, but `Content-Type` should be left to the browser when using `FormData`.
+
+## Comparison
+
+| Package | Best fit | Notes |
+| --- | --- | --- |
+| `react-chunked-upload` | A small React hook for sequential chunk uploads with pause, resume, retry, headers, and multipart fields. | Bring your own backend merge logic. |
+| `@rpldy/chunked-uploady` | A fuller upload framework with Uploady ecosystem integrations. | More features and package surface than a single hook. |
+| `@rpldy/tus-sender` | Apps that use the tus resumable upload protocol. | Requires a tus-compatible backend. |
+| `rc-upload` | General-purpose upload UI plumbing. | Not focused on chunk merge workflows by default. |
+| Uploadcare | Managed upload, storage, and CDN workflows. | External service instead of a small client-side library. |
 
 ## Community
 
