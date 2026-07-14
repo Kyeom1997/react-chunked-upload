@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.1.4
+
+- Improved npm search metadata for React and large-file upload queries.
+- Reworked the README introduction with installation, fit guidance, and runnable examples.
+- Replaced the generated Vite documentation with instructions for the React demo.
+
+## 0.1.3
+
+- Added GitHub Actions checks for tests and package builds.
+- Added a runnable Express server that stores and merges uploaded chunks.
+- Added package comparison and backend integration guidance.
+
 ## 0.1.2
 
 - Added custom `headers` and multipart `fields` support.
