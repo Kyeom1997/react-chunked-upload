@@ -5,11 +5,33 @@
 [![GitHub stars](https://img.shields.io/github/stars/Kyeom1997/react-chunked-upload?style=flat)](https://github.com/Kyeom1997/react-chunked-upload/stargazers)
 [![license](https://img.shields.io/npm/l/react-chunked-upload.svg)](./LICENSE)
 
-A lightweight React hook for sequential, chunked file uploads with pause, resume, and retry support.
+A lightweight React hook for chunked large-file uploads with pause, resume, retry, progress, custom headers, and multipart fields.
 
 [npm](https://www.npmjs.com/package/react-chunked-upload) | [GitHub](https://github.com/Kyeom1997/react-chunked-upload) | [Report a bug](https://github.com/Kyeom1997/react-chunked-upload/issues/new?template=bug_report.yml) | [Request a feature](https://github.com/Kyeom1997/react-chunked-upload/issues/new?template=feature_request.yml)
 
-## Why this exists?
+- Small, headless React hook with no runtime dependencies
+- Sequential chunk uploads using the browser `File` and `Blob` APIs
+- Pause, resume, failed-chunk retry, and byte-based progress
+- Bring your own upload endpoint, authentication, storage, and UI
+
+## Installation
+
+```bash
+npm install react-chunked-upload
+```
+
+## Examples
+
+- [React demo](./example) - interactive Vite app with a built-in mock upload endpoint
+- [Express server](./examples/express-server) - receives, stores, and merges uploaded chunks
+
+## When to use it
+
+Use `react-chunked-upload` when you need a small, UI-agnostic React file upload hook and control your own backend. It fits large video, archive, dataset, and document uploads where retrying a failed chunk is preferable to restarting the entire file.
+
+For uploads that must resume after a browser refresh or across devices, use a persistent upload protocol such as tus instead. This package currently keeps upload state in memory for the active page session.
+
+## Why chunk files?
 
 When uploading large files (e.g., 5GB videos or huge CSV datasets) in a traditional single-request manner, a network hiccup or timeout can cause the entire upload to fail, resulting in poor user experience and wasted bandwidth. 
 
@@ -18,12 +40,6 @@ By splitting the file into small chunks (e.g., 5MB) on the client side using the
 - **Control**: You can pause and resume the upload at any time.
 - **Feedback**: Byte-based progress after each completed chunk.
 - **Memory Efficiency**: The browser doesn't need to load the entire file into memory at once.
-
-## Installation
-
-```bash
-npm install react-chunked-upload
-```
 
 ## Usage
 

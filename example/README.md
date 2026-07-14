@@ -1,32 +1,28 @@
-# React + TypeScript + Vite
+# React Chunked Upload Demo
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Interactive Vite demo for `react-chunked-upload`. Select a file to see chunk progress and test pause, resume, and retry behavior.
 
-Currently, two official plugins are available:
+The Vite development server includes a lightweight mock endpoint at `/api/upload-chunk`, so the UI works without a separate backend. It accepts each request but does not store or merge chunks.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Run
 
-## React Compiler
+Build the package from the repository root first:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install
+npm run build
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Then start the demo:
+
+```bash
+cd example
+npm install
+npm run dev
+```
+
+Open the local URL printed by Vite and select a file.
+
+## Test with a real backend
+
+For a server that stores and merges chunks, run the [Express example](../examples/express-server) and point `uploadUrl` in `src/App.tsx` to `http://localhost:4000/upload-chunk`.
